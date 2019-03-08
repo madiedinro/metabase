@@ -1,10 +1,8 @@
 (ns metabase.async.semaphore-channel
   (:require [clojure.core.async :as a]
-            [metabase.util.i18n :refer [trs]]
             [clojure.tools.logging :as log]
-            [clojure.core.async :as async])
+            [metabase.util.i18n :refer [trs]])
   (:import java.io.Closeable
-           java.nio.channels.Channel
            java.lang.ref.WeakReference))
 
 (defn- permit [id return!]
@@ -36,7 +34,7 @@
           (let [id       (swap! id-counter inc)
                 permit   (permit id #(a/>!! in %))
                 weak-ref (WeakReference. permit)]
-            (println #_log/debug (trs "Created {0}" permit))
+            (log/debug (trs "Created {0}" permit))
             (swap! weak-refs assoc id weak-ref)
             (a/>!! permits permit)
             nil))]
@@ -47,7 +45,7 @@
 
     ;; loop to handle returned permits
     (a/go-loop [id (a/<! in)]
-      (println #_log/debug (trs "Permit {0} returned nicely" id))
+      (log/debug (trs "Permit {0} returned nicely" id))
       (let [[old] (swap-vals! weak-refs dissoc id)]
         (when (get old id)
           (create-new-permit!)))
@@ -55,7 +53,6 @@
 
     ;; loop to take returned permits and make them available to the `out` channel consumed elsewhere, or to clean up
     (a/go-loop [permit (a/poll! permits)]
-      #_(println "out loop got permit:" (str permit))
       (if permit
         (do
           (a/>! out permit)
@@ -63,9 +60,9 @@
 
         ;; Out of permits. Cleanup time!
         (do
-          (println #_log/debug (trs "Initiating clean up of abandoned permits. Total weak refs: {0}/{1}" (count @weak-refs) n))
+          (log/debug (trs "Initiating clean up of abandoned permits. Total weak refs: {0}/{1}" (count @weak-refs) n))
           (doseq [[id, ^WeakReference weak-ref] @weak-refs]
-            (println #_log/debug (trs "Check permit {0} abandoned? {1}" id (nil? (.get weak-ref))))
+            (log/debug (trs "Check permit {0} abandoned? {1}" id (nil? (.get weak-ref))))
             (when-not (.get weak-ref)
               (log/warn (trs "Warning: abandoned Permit {0} recovered. Make sure you're closing permits when done." id))
               (let [[old] (swap-vals! weak-refs dissoc id)]
@@ -74,44 +71,6 @@
           (recur (a/<! permits)))))
 
     out))
-
-
-;; NOCOMMIT
-(defn- y [c]
-  (println "[1] in another function" (a/<!! c)))
-
-(defn- x []
-  (let [c (semaphore-channel 3)]
-    (y c)
-    (try
-      (with-open [permit (a/<!! c)]
-        (println "[2] with-open" permit) ; NOCOMMIT
-        )
-      (with-open [permit (a/<!! c)]
-        (println "[3] with-open" permit) ; NOCOMMIT
-        )
-      (println "[4] in same fn" (a/<!! c))
-      (println "[5] in same fn" (a/<!! c))
-      (let [[result] (a/alts!! [c] :default ::not-available)]
-        (println "[6] in same fn [poll]" result)
-        (assert (= result ::not-available)))
-      (System/gc)
-      (let [[result] (a/alts!! [c] :default ::not-available)]
-        (println "[7] in same fn [poll]" result)
-        (assert (not= result ::not-available)))
-      (let [p8 (a/<!! c)
-            _ (println "[8] let-bound" p8)
-            p9 (a/<!! c)
-            _ (println "[9] let-bound" p9)]
-        (System/gc)
-        (let [[result] (a/alts!! [c] :default ::not-available)]
-          (println "[10] in same fn [poll]" result)
-          (assert (not= result ::not-available))))
-
-
-      (finally (a/close! c)))))
-
-
 
 (defn- closed-or-has-message?
   "True if a core.async channel is open and doesn't have any messages ready."

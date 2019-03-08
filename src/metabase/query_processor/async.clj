@@ -11,6 +11,7 @@
   a permit, then put it back when it finishes."
   (:require [clojure.core.async :as a]
             [clojure.core.async.impl.protocols :as async.protocols]
+            [metabase.async.semaphore-channel :as semaphore-channel]
             [metabase.models.setting :refer [defsetting]]
             [metabase.util.i18n :refer [trs]]
             [metabase
@@ -34,7 +35,7 @@
      ;; channel already exists
      (@db-semaphore-channels id)
      ;; channel does not exist, Create a channel and stick it in the atom
-     (let [ch     (semaphore-chan)
+     (let [ch     (semaphore-channel/semaphore-channel (max-simultaneous-queries-per-db))
            new-ch ((swap! db-semaphore-channels update id #(or % ch)) id)]
        ;; ok, if the value swapped into the atom was a different channel (another thread beat us to it) then close our
        ;; newly created channel
@@ -53,7 +54,7 @@
   (let [semaphore-chan (db-semaphore-channel db)
         ;; open a channel to receive the result
         result-chan    (a/chan 1)
-        do-f           (do-f-after-receiving-permit-fn semaphore-chan result-chan f args)]
+        do-f           (semaphore-channel/do-f-after-receiving-permit-fn semaphore-chan result-chan f args)]
     (a/go
       (do-f (a/<! semaphore-chan)))
     ;; return a channel that can be used to get the response, and one that can be used to cancel the request

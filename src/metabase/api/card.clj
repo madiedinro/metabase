@@ -38,8 +38,11 @@
             [schema.core :as s]
             [toucan
              [db :as db]
-             [hydrate :refer [hydrate]]])
+             [hydrate :refer [hydrate]]]
+            [clojure.core.async :as a]
+            [metabase.query-processor.async :as qp.async])
   (:import java.util.UUID
+           clojure.core.async.impl.channels.ManyToManyChannel
            metabase.models.card.CardInstance))
 
 ;;; --------------------------------------------------- Hydration ----------------------------------------------------
@@ -181,16 +184,30 @@
 ;; we'll also pass a simple checksum and have the frontend pass it back to us.  See the QP `results-metadata`
 ;; middleware namespace for more details
 
-(s/defn ^:private result-metadata-for-query :- qr/ResultsMetadata
-  "Fetch the results metadata for a QUERY by running the query and seeing what the QP gives us in return.
-   This is obviously a bit wasteful so hopefully we can avoid having to do this."
+(s/defn ^:private result-metadata-for-query :- ManyToManyChannel
+  "Fetch the results metadata for a `query` by running the query and seeing what the QP gives us in return.
+   This is obviously a bit wasteful so hopefully we can avoid having to do this. Returns a channel to get the
+   results."
   [query]
-  (binding [qpi/*disable-qp-logging* true]
-    (let [{:keys [status], :as results} (qp/process-query-without-save! api/*current-user-id* query)]
-      (if (= status :failed)
-        (log/error (trs "Error running query to determine Card result metadata:")
-                   (u/pprint-to-str 'red results))
-        (get-in results [:data :results_metadata :columns])))))
+  (let [output-chan  (a/chan 1)
+        current-user api/*current-user-id*
+        ;; TODO - does binding work the way we'd expect here?
+        input-chan   (binding [qpi/*disable-qp-logging* true]
+                       (qp.async/process-query-without-save! current-user query))]
+    ;; send off a block to get the results from the QP when they come in, process them, and then send them out to
+    ;; `output-chan`
+    (a/go
+      (try
+        (let [{:keys [status], :as results} (a/<! input-chan)]
+          (when (= status :failed)
+            (log/error (trs "Error running query to determine Card result metadata:")
+                       (u/pprint-to-str 'red results)))
+          (a/>! output-chan (get-in results [:data :results_metadata :columns])))
+        (finally
+          (a/close! output-chan))))
+
+    ;; return our `output-chan`
+    output-chan))
 
 (s/defn ^:private result-metadata :- (s/maybe qr/ResultsMetadata)
   "Get the right results metadata for this CARD. We'll check to see whether the METADATA passed in seems valid;
