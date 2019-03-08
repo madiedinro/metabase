@@ -34,7 +34,7 @@
         (catch Throwable e
           (raise e))))))
 
-(defn- api-exception-response
+(defn api-exception-response
   "Convert an exception from an API endpoint into an appropriate HTTP response."
   [^Throwable e]
   (let [{:keys [status-code], :as info}
